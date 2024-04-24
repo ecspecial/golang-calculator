@@ -1,3 +1,127 @@
+document.addEventListener('DOMContentLoaded', function() {
+    checkAuthentication();
+});
+
+function checkAuthentication() {
+    const token = localStorage.getItem('jwt');
+    if (token) {
+        document.getElementById('auth-section').style.display = 'none';
+        document.getElementById('app-section').style.display = 'block';
+        // Initialize app functions
+        // initializeApp();
+    } else {
+        document.getElementById('app-section').style.display = 'none';
+        document.getElementById('auth-section').style.display = 'block';
+    }
+}
+
+function login() {
+    const username = document.getElementById('login-username').value;
+    const password = document.getElementById('login-password').value;
+
+    fetch('http://localhost:8080/api/v1/login', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ Login: username, Password: password })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error('Login failed');
+        }
+        return response.json();
+    })
+    .then(data => {
+        localStorage.setItem('jwt', data.jwt);
+        const id = getUserIDFromJWT();
+        // console.log('id', id);
+        checkAuthentication();
+        fetchServerStatuses();
+        loadAllCalculations(); // Загрузка всех вычислений при загрузке страницы
+    })
+    .catch(error => {
+        console.error('Error logging in:', error);
+        alert('Error logging in: ' + error.message);
+    });
+}
+
+// Функция выхода
+function logout() {
+    localStorage.removeItem('jwt'); 
+    document.getElementById('app-section').style.display = 'none';
+    document.getElementById('auth-section').style.display = 'block';
+    alert('You have been logged out.');
+}
+
+// Функция очистки результатов калькуляции
+function clearOperations() {
+    const calculationResultsSection = document.getElementById('calculation-results');
+    if (calculationResultsSection) {
+        calculationResultsSection.innerHTML = '';
+    }
+}
+
+function getUserIDFromJWT() {
+    const token = localStorage.getItem('jwt');
+    if (!token) return null;
+
+    const base64Url = token.split('.')[1]; // Access the payload part of the token
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/'); // Normalize base64 string
+    const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+    }).join(''));
+
+    const payload = JSON.parse(jsonPayload);
+    return payload.userID; // Make sure the key matches the payload's key
+}
+
+// Функция очистки формы регистрации
+function clearRegistrationForm() {
+    document.getElementById('register-username').value = ''; // Clears the username input
+    document.getElementById('register-password').value = ''; // Clears the password input
+}
+
+// Функция регистрации
+function register() {
+    const username = document.getElementById('register-username').value;
+    console.log('username', username)
+    const password = document.getElementById('register-password').value;
+    console.log('password', password)
+
+    fetch('http://localhost:8080/api/v1/register', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ Login: username, Password: password })  // Make sure keys match server expectations
+    })
+    .then(response => response.json())  // Always expect JSON response
+    .then(data => {
+        if (data.success) {
+            alert('Registration successful, please log in.');
+            clearRegistrationForm();
+        } else {
+            throw new Error(data.error || 'Registration failed.');
+        }
+    })
+    .catch(error => {
+        console.error('Error registering:', error);
+        alert(error.message);
+    });
+}
+
+// function initializeApp() {
+//     // Load calculations, statuses, etc.
+//     fetchServerStatuses();
+//     loadAllCalculations();
+//     document.getElementById('reload-server-status').addEventListener('click', fetchServerStatuses);
+//     document.getElementById('reload-operations-status').addEventListener('click', updateResults);
+//     setInterval(updateResults, 60000);
+//     applySettings();
+//     document.querySelector('button[onclick="saveSettings()"]').addEventListener('click', applySettings);
+// }
+
 // Отправить вычисление на сервер
 function submitCalculation() {
     const expression = document.getElementById('expression').value; // Получаем выражение от пользователя
@@ -20,7 +144,8 @@ function submitCalculation() {
         headers: {
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
+            UserId: getUserIDFromJWT(),
             operation: expression,
             add_duration: parseInt(document.getElementById('plus-time').value),
             subtract_duration: parseInt(document.getElementById('minus-time').value),
@@ -36,7 +161,7 @@ function submitCalculation() {
             let successfulIDs = JSON.parse(localStorage.getItem('successfulIDs')) || [];
             successfulIDs.push(data.id);
             localStorage.setItem('successfulIDs', JSON.stringify(successfulIDs));
-            
+
             // Добавляем новый элемент для отображения операции и статуса
             appendCalculationResult(calculationResultsSection, data.id, data.operation, 'pending');
         } else if (data.status === 'error') {
@@ -50,13 +175,36 @@ function submitCalculation() {
     });
 }
 
-// Функция для загрузки всех вычислений и предотвращения дубликатов
-function loadAllCalculations() {
-    // Очищаем существующие вычисления, чтобы избежать дублирования
-    const calculationResultsSection = document.getElementById('calculation-results');
-    calculationResultsSection.innerHTML = '';
+// // Функция для загрузки всех вычислений и предотвращения дубликатов
+// function loadAllCalculations() {
+//     // Очищаем существующие вычисления, чтобы избежать дублирования
+//     const calculationResultsSection = document.getElementById('calculation-results');
+//     calculationResultsSection.innerHTML = '';
 
-    fetch('http://localhost:8080/get-all-calculations')
+//     fetch('http://localhost:8080/get-all-calculations')
+//         .then(response => response.json())
+//         .then(data => {
+//             data.forEach(calculation => {
+//                 const status = calculation.status === 'completed' ? 'success' : 'pending';
+//                 const resultText = calculation.status === 'completed' ? calculation.result : '?';
+//                 appendCalculationResult(calculationResultsSection, calculation.id, `${calculation.operation} Result = ${resultText}`, status);
+//             });
+//         })
+//         .catch(error => console.error('Error loading calculations:', error));
+// }
+
+// Функция для загрузки всех вычислений конкретного пользователя по его userId
+function loadAllCalculations() {
+    const calculationResultsSection = document.getElementById('calculation-results');
+    calculationResultsSection.innerHTML = '';  // Очищаем существующие вычисления, чтобы избежать дублирования
+
+    const userId = getUserIDFromJWT(); // Получаем userId из JWT, хранящегося в localStorage
+    if (!userId) {
+        console.error('User ID is missing or invalid');
+        return; // Возвращаем ошибку или прекращаем выполнение, если ID пользователя не найден
+    }
+
+    fetch(`http://localhost:8080/get-calculations-by-user?userId=${userId}`)
         .then(response => response.json())
         .then(data => {
             data.forEach(calculation => {
@@ -98,7 +246,7 @@ function saveSettings() {
     localStorage.setItem('multiply-time', document.getElementById('multiply-time').value);
     localStorage.setItem('divide-time', document.getElementById('divide-time').value);
     localStorage.setItem('inactive-server-time', document.getElementById('inactive-server-time').value);
-    
+
     alert('Settings saved successfully.');
 }
 

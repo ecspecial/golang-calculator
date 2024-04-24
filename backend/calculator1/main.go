@@ -2,6 +2,8 @@ package main
 
 import (
     // Импортирование необходимых пакетов
+    "context"
+    "net"
     "encoding/json"    // Для работы с JSON
     "fmt"              // Для форматированного ввода и вывода
     "log"              // Для логирования
@@ -11,10 +13,22 @@ import (
 	"database/sql"     // Для работы с базой данных
 
     // Импортирование собственных пакетов
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/codes"
+    "google.golang.org/grpc/status"
+    pb "calculatorapi/proto/calculator/calculatorapi/proto/calculator"
     "calculatorapi/utility/calculation"  // Для выполнения вычислений
 	"calculatorapi/utility/database"     // Для работы с базой данных
 )
 
+const (
+    httpPort = ":8081"
+    port = ":50051"
+)
+
+type server struct {
+    pb.UnimplementedCalculatorServiceServer
+}
 
 // Структура запроса на выполнение операции
 type OperationRequest struct {
@@ -86,10 +100,61 @@ func startCalculation(db *sql.DB, id int, operation string, times map[string]int
     }()
 }
 
+func convertToIntMap(input map[string]int32) map[string]int {
+	output := make(map[string]int)
+	for key, value := range input {
+		output[key] = int(value)
+	}
+	return output
+}
+
+func (s *server) PerformCalculation(ctx context.Context, req *pb.CalculationRequest) (*pb.CalculationResponse, error) {
+    // Lock the mutex to ensure thread safety
+    mu.Lock()
+
+    // Check if the server is shutting down
+    if !serverRunning {
+        mu.Unlock()
+        return nil, status.Error(codes.Unavailable, "Server is shutting down")
+    }
+
+    // Check if the server has reached its maximum capacity
+    if currentGoroutines >= maxGoroutines {
+        mu.Unlock()
+        return nil, status.Error(codes.ResourceExhausted, "Server max capacity reached")
+    }
+
+    // Increment the number of current goroutines
+    currentGoroutines++
+
+    // Unlock the mutex before starting the calculation
+    mu.Unlock()
+
+    // Start the calculation
+    db := database.GetDB()
+    startCalculation(db, int(req.Id), req.Operation, convertToIntMap(req.Times))
+
+    // Return the calculation response
+    return &pb.CalculationResponse{Id: req.Id}, nil
+}
 // Основная функция сервера
 func main() {
     // Инициализация соединения с базой данных
 	database.InitializeDB()
+
+    // Start gRPC server
+	lis, err := net.Listen("tcp", port)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	pb.RegisterCalculatorServiceServer(grpcServer, &server{})
+	fmt.Printf("gRPC server is starting on port %s...\n", port)
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
 	
     // Обработчик запроса на выполнение вычисления
     http.HandleFunc("/calculate", func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +242,7 @@ func main() {
         log.Fatal("Server gracefully shut down")
     }()
 
-    // Запуск сервера на порту 8081
-    fmt.Println("Calculator server is starting on port 8081...")
-    log.Fatal(http.ListenAndServe(":8081", nil))
+    // Запуск сервера на порту
+    fmt.Printf("Calculator server is starting on port %s...\n", httpPort)
+    log.Fatal(http.ListenAndServe(httpPort, nil))
 }

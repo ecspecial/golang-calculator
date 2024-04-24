@@ -10,6 +10,7 @@ import (
 	"calculatorapi/utility/models" // Структуры данных для калькулятора
 
 	_ "github.com/lib/pq" // Драйвер PostgreSQL
+    "golang.org/x/crypto/bcrypt" // Драйвер для хэширования паролей
 )
 
 // Параметры подключения к базе данных
@@ -48,6 +49,21 @@ func InitializeDB() {
 	}
 
 	fmt.Println("Database connection established") // Сообщение об успешном соединении
+}
+
+// InitializeDB устанавливает новое соединение с базой данных.
+func InitializeTestDB(db *sql.DB) error {
+    if db == nil {
+        return fmt.Errorf("database connection is nil")
+    }
+
+    // The actual initialization logic here...
+    if err := db.Ping(); err != nil {
+        return fmt.Errorf("cannot connect to database: %v", err)
+    }
+
+    fmt.Println("Database connection established")
+    return nil
 }
 
 // GetDB возвращает глобальное соединение с базой данных, убеждаясь, что оно инициализировано и подключено.
@@ -99,9 +115,16 @@ func SetupDatabase() (*sql.DB, error) {
         }
         fmt.Printf("Database '%s' created successfully.\n", dbname)
     }
-
+    fmt.Println("Checking and creating tables if necessary...")
     err = CreateTableIfNotExists(db)
     if err != nil {
+        log.Fatalf("Failed to create Calculations tables: %v", err)
+        return nil, err
+    }
+
+    err = CreateUserTableIfNotExists(db)
+    if err != nil {
+        log.Fatalf("Failed to create User tables: %v", err)
         return nil, err
     }
 
@@ -136,6 +159,7 @@ func CreateTableIfNotExists(db *sql.DB) error {
 	query := `
 		CREATE TABLE calculations (
 			id SERIAL PRIMARY KEY,
+            userId INTEGER NOT NULL,
 			operation TEXT,
 			result DOUBLE PRECISION,
 			status TEXT,
@@ -161,7 +185,7 @@ func CreateTableIfNotExists(db *sql.DB) error {
 }
 
 // InsertCalculation вставляет новую запись о вычислении в таблицу 'calculations'.
-func InsertCalculation(db *sql.DB, operation string, addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime int) (int, error) {
+func InsertCalculation(db *sql.DB, userId int, operation string, addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime int) (int, error) {
     // Вставка данных о вычислении и возвращение идентификатора записи
     if err := db.Ping(); err != nil {
         // If not, attempt to reconnect
@@ -177,15 +201,15 @@ func InsertCalculation(db *sql.DB, operation string, addDuration, subtractDurati
 
     // Proceed with the insertion
     query := `
-        INSERT INTO calculations (operation, status, created_time, add_duration, subtract_duration, multiply_duration, divide_duration, inactive_server_time)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO calculations (userId, operation, status, created_time, add_duration, subtract_duration, multiply_duration, divide_duration, inactive_server_time)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id
     `
     status := `created`
     createdTime := time.Now().UTC()
 
     var id int
-    err := db.QueryRow(query, operation, status, createdTime, addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime).Scan(&id)
+    err := db.QueryRow(query, userId, operation, status, createdTime, addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime).Scan(&id)
     if err != nil {
         return 0, err
     }
@@ -214,7 +238,7 @@ func RunCheckCreatedRecords(db *sql.DB) {
 func checkAndPrintCreatedRecords(db *sql.DB) error {
 	// SQL-запроc.
 	query := `
-		SELECT id, operation, created_time, add_duration, subtract_duration, multiply_duration, divide_duration, inactive_server_time
+		SELECT id, userId, operation, created_time, add_duration, subtract_duration, multiply_duration, divide_duration, inactive_server_time
 		FROM calculations
 		WHERE status = 'created'
 	`
@@ -229,6 +253,7 @@ func checkAndPrintCreatedRecords(db *sql.DB) error {
 	for rows.Next() { // Перебор всех полученных записей.
 		var (
 			id                   int
+            userId               int
 			operation            string
 			createdTime          time.Time
 			addDuration          int
@@ -239,13 +264,13 @@ func checkAndPrintCreatedRecords(db *sql.DB) error {
 		)
 
 		// Считывание значений текущей записи.
-		if err := rows.Scan(&id, &operation, &createdTime, &addDuration, &subtractDuration, &multiplyDuration, &divideDuration, &inactiveServerTime); err != nil {
+		if err := rows.Scan(&id, &userId, &operation, &createdTime, &addDuration, &subtractDuration, &multiplyDuration, &divideDuration, &inactiveServerTime); err != nil {
 			return fmt.Errorf("error scanning row: %w", err)
 		}
 
 		// Вывод информации о записи.
-		fmt.Printf("ID: %d, Operation: %s, Created Time: %s, Add Duration: %d, Subtract Duration: %d, Multiply Duration: %d, Divide Duration: %d, Inactive Server Time: %d\n",
-			id, operation, createdTime.Format("2006-01-02 15:04:05"), addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime)
+		fmt.Printf("ID: %d, User ID: %d, Operation: %s, Created Time: %s, Add Duration: %d, Subtract Duration: %d, Multiply Duration: %d, Divide Duration: %d, Inactive Server Time: %d\n",
+			id, userId, operation, createdTime.Format("2006-01-02 15:04:05"), addDuration, subtractDuration, multiplyDuration, divideDuration, inactiveServerTime)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -296,7 +321,7 @@ func UpdateCalculationStatusToWork(db *sql.DB, id int) error {
 func FetchCalculationsToProcess(db *sql.DB) ([]models.CalculationRequest, error) {
     var calculations []models.CalculationRequest // Слайс для хранения результатов.
 
-    query := `SELECT id, operation, add_duration, subtract_duration, multiply_duration, divide_duration FROM calculations WHERE status = 'created' LIMIT 5`
+    query := `SELECT id, userId, operation, add_duration, subtract_duration, multiply_duration, divide_duration FROM calculations WHERE status = 'created' LIMIT 5`
     rows, err := db.Query(query) // Выполнение запроса.
 	// Возврат ошибки в случае ее возникновения.
     if err != nil {
@@ -306,7 +331,7 @@ func FetchCalculationsToProcess(db *sql.DB) ([]models.CalculationRequest, error)
 
     for rows.Next() { // Перебор всех полученных записей.
         var calc models.CalculationRequest
-        if err := rows.Scan(&calc.ID, &calc.Operation, &calc.AddDuration, &calc.SubtractDuration, &calc.MultiplyDuration, &calc.DivideDuration); err != nil {
+        if err := rows.Scan(&calc.ID, &calc.UserId, &calc.Operation, &calc.AddDuration, &calc.SubtractDuration, &calc.MultiplyDuration, &calc.DivideDuration); err != nil {
             return nil, err // Возврат ошибки при возникновении.
         }
         calculations = append(calculations, calc) // Добавление записи в слайс.
@@ -322,17 +347,21 @@ func FetchCalculationsToProcess(db *sql.DB) ([]models.CalculationRequest, error)
 // GetCalculationResultByID извлекает результат вычисления по его ID.
 func GetCalculationResultByID(db *sql.DB, id int) (*models.CalculationResponse, error) {
     var (
+        operation string
         result sql.NullFloat64 // Использование sql.NullFloat64 для обработки NULL значений.
         status string
+        userId int
     )
-    query := `SELECT result, status FROM calculations WHERE id = $1` // SQL-запрос для выборки.
-    err := db.QueryRow(query, id).Scan(&result, &status) // Выполнение запроса и считывание результатов.
+    query := `SELECT operation, result, status, userId FROM calculations WHERE id = $1` // SQL-запрос для выборки.
+    err := db.QueryRow(query, id).Scan(&operation, &result, &status, &userId) // Выполнение запроса и считывание результатов.
     if err != nil {
         return nil, err // Возврат ошибки при возникновении.
     }
 
     calcResult := &models.CalculationResponse{
         ID:     id,
+        Operation: operation,
+        UserId: userId,
         Status: status,
     }
 
@@ -347,7 +376,7 @@ func GetCalculationResultByID(db *sql.DB, id int) (*models.CalculationResponse, 
 func FetchAllCalculations(db *sql.DB) ([]models.OperationResponse, error) {
     var calculations []models.OperationResponse // Слайс для хранения результатов.
 
-    query := `SELECT id, operation, result, status FROM calculations` // SQL-запрос для выборки всех записей.
+    query := `SELECT id, userId, operation, result, status FROM calculations` // SQL-запрос для выборки всех записей.
     rows, err := db.Query(query) // Выполнение запроса.
     if err != nil {
         return nil, fmt.Errorf("querying calculations: %w", err)
@@ -358,7 +387,7 @@ func FetchAllCalculations(db *sql.DB) ([]models.OperationResponse, error) {
         var calc models.OperationResponse
         var result sql.NullFloat64 // Использование sql.NullFloat64 для обработки NULL значений.
 
-        if err := rows.Scan(&calc.ID, &calc.Operation, &result, &calc.Status); err != nil {
+        if err := rows.Scan(&calc.ID, &calc.UserId, &calc.Operation, &result, &calc.Status); err != nil {
             return nil, fmt.Errorf("scanning calculation: %w", err)
         }
 
@@ -378,6 +407,39 @@ func FetchAllCalculations(db *sql.DB) ([]models.OperationResponse, error) {
     return calculations, nil // Возвращение слайса с результатами и nil в случае успешного выполнения функции.
 }
 
+// FetchCalculationsByUser извлекает все вычисления для конкретного пользователя.
+func FetchCalculationsByUser(db *sql.DB, userId int) ([]models.OperationResponse, error) {
+    var calculations []models.OperationResponse
+
+    query := `SELECT id, userId, operation, result, status FROM calculations WHERE userId = $1`
+    rows, err := db.Query(query, userId) // Выполнение запроса с фильтрацией по userId.
+    if err != nil {
+        return nil, fmt.Errorf("querying calculations for user %d: %w", userId, err)
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+        var calc models.OperationResponse
+        var result sql.NullFloat64 // Для обработки NULL значений.
+
+        if err := rows.Scan(&calc.ID, &calc.UserId, &calc.Operation, &result, &calc.Status); err != nil {
+            return nil, fmt.Errorf("scanning calculation: %w", err)
+        }
+
+        if result.Valid {
+            calc.Result = result.Float64
+        }
+
+        calculations = append(calculations, calc)
+    }
+
+    if err = rows.Err(); err != nil {
+        return nil, fmt.Errorf("iterating over calculations results: %w", err)
+    }
+
+    return calculations, nil
+}
+
 // ClearAllCalculations удаляет все строки из таблицы 'calculations'.
 func ClearAllCalculations(db *sql.DB) error {
     // SQL statement to delete all rows
@@ -388,4 +450,64 @@ func ClearAllCalculations(db *sql.DB) error {
     }
     fmt.Println("All calculations cleared successfully.")
     return nil // Возвращение nil в случае успешного выполнения функции.
+}
+
+// CreateUserTableIfNotExists проверяет наличие в базе данных таблицы users и создает таковую при ее отсутствии
+func CreateUserTableIfNotExists(db *sql.DB) error {
+    var tableExists bool
+    err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users')").Scan(&tableExists)
+    if err != nil {
+        return err
+    }
+
+    if !tableExists {
+        query := `
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            login TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )`
+        _, err = db.Exec(query)
+        if err != nil {
+            return err
+        }
+        fmt.Println("Table 'users' created successfully.")
+    } else {
+        fmt.Println("Table 'users' already exists.")
+    }
+    return nil
+}
+
+// RegisterUser добавляет нового юзера в базу данных с хешированным паролем
+func RegisterUser(db *sql.DB, login, password string) error {
+    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+    if err != nil {
+        return err
+    }
+
+    query := "INSERT INTO users (login, password) VALUES ($1, $2)"
+    _, err = db.Exec(query, login, string(hashedPassword))
+    if err != nil {
+        return err
+    }
+
+    fmt.Println("User registered successfully.")
+    return nil
+}
+
+// GetUserByLogin получает юзера по логину из базы данный
+func GetUserByLogin(db *sql.DB, login string) (*models.User, error) {
+    user := &models.User{}
+
+    query := `SELECT id, login, password FROM users WHERE login = $1`
+    row := db.QueryRow(query, login)
+    err := row.Scan(&user.ID, &user.Login, &user.Password)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return nil, fmt.Errorf("user not found")
+        }
+        return nil, err
+    }
+
+    return user, nil
 }
